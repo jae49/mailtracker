@@ -1,0 +1,14 @@
+.gradle/
+build/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+# keystores / certs — never commit private keys
+*.pfx
+*.p12
+*.jks
+*.pem
+*.key
+.idea/
+*.iml

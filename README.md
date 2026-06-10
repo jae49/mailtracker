@@ -106,8 +106,15 @@ never commit it — the repo's `.gitignore` already excludes `*.pfx`/`*.p12`/`*.
 3. **API permissions →** add **application** permissions and **Grant admin consent**:
    - Microsoft Graph: `MailboxSettings.Read` (server-side rules)
    - Microsoft Graph: `MailboxConfigItem.Read` (future FAI transport)
+   - Office 365 Exchange Online: `Exchange.ManageAsApp` (Exchange Admin API, for the
+     `Get-InboxRule` cross-check). On the preview Admin API this may appear as
+     `Exchange.ManageAsAppV2` — grant whichever your portal lists.
    - Office 365 Exchange Online: `full_access_as_app` (EWS FAI transport, today)
-4. Assign an **Exchange RBAC role** to the app's service principal granting `Get-InboxRule`.
+4. Assign an **Exchange RBAC role** to the app's service principal granting `Get-InboxRule`. This is
+   a *separate* door from the `Exchange.ManageAsApp` permission in step 3: that permission lets the
+   app authenticate to the Exchange management endpoint at all, while the RBAC role controls which
+   cmdlets it may run once in. Both are required for the Exchange Admin source — without the role a
+   valid token still returns `403 Forbidden`.
 5. *(Recommended)* scope mailbox access via RBAC for Applications, and add the app to the EWS
    **AppID allow list** while EWS is in use.
 

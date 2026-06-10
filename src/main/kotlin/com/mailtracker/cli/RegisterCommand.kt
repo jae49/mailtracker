@@ -112,9 +112,13 @@ class RegisterCommand : CliktCommand(name = "register") {
             |  3. API permissions → add APPLICATION permissions and Grant admin consent:
             |        • Microsoft Graph: MailboxSettings.Read   (server-side rules)
             |        • Microsoft Graph: MailboxConfigItem.Read (future FAI transport)
+            |        • Office 365 Exchange Online: Exchange.ManageAsApp (Exchange Admin API /
+            |          Get-InboxRule; preview Admin API may list it as Exchange.ManageAsAppV2)
             |        • Office 365 Exchange Online: full_access_as_app (EWS FAI transport, today)
             |  4. Assign an Exchange RBAC role to the app's service principal that grants
-            |     Get-InboxRule (for the Exchange Admin API source).
+            |     Get-InboxRule. This is SEPARATE from Exchange.ManageAsApp above: the permission
+            |     lets the app reach the Exchange management endpoint; the RBAC role controls which
+            |     cmdlets it may run (without it a valid token still returns 403).
             |  5. (Recommended) scope mailbox access via RBAC for Applications, and add the app to
             |     the EWS AppID allow list while EWS is in use.
             |

@@ -14,7 +14,7 @@ rule *drift* over time surfaces them.
 | Layer | Source | Notes |
 |-------|--------|-------|
 | Server-side (structured) | Microsoft Graph `messageRules` | Primary, GA. Permission `MailboxSettings.Read`. |
-| Server-side (cross-check) | Exchange Admin API `Get-InboxRule` | Corroborates/enriches Graph. Needs an Exchange RBAC role. |
+| Server-side (cross-check) | Exchange Admin API `Get-InboxRule` | Corroborates/enriches Graph. Needs `Exchange.ManageAsApp` + an Entra directory role. |
 | Client-only / hidden | FAI rule blob → MS-OXORULE parse | The bytes live only in the mailbox's hidden FAI rule messages. |
 
 The **FAI transport** that fetches the client-rule blob is pluggable:
@@ -98,25 +98,134 @@ never commit it — the repo's `.gitignore` already excludes `*.pfx`/`*.p12`/`*.
 
 ## One-time tenant setup (in the Microsoft admin portals)
 
-1. **Entra admin center → App registrations → New registration.** Note the *Directory (tenant) ID*
-   and *Application (client) ID*.
-2. **Certificates & secrets →** upload your certificate's **public** key (`.cer` — see
-   [Creating the certificate](#creating-the-certificate) above). Keep the matching PKCS#12
-   (`.pfx`/`.p12`) private key on the machine running mailtracker.
-3. **API permissions →** add **application** permissions and **Grant admin consent**:
-   - Microsoft Graph: `MailboxSettings.Read` (server-side rules)
-   - Microsoft Graph: `MailboxConfigItem.Read` (future FAI transport)
-   - Office 365 Exchange Online: `Exchange.ManageAsApp` (Exchange Admin API, for the
-     `Get-InboxRule` cross-check). On the preview Admin API this may appear as
-     `Exchange.ManageAsAppV2` — grant whichever your portal lists.
-   - Office 365 Exchange Online: `full_access_as_app` (EWS FAI transport, today)
-4. Assign an **Exchange RBAC role** to the app's service principal granting `Get-InboxRule`. This is
-   a *separate* door from the `Exchange.ManageAsApp` permission in step 3: that permission lets the
-   app authenticate to the Exchange management endpoint at all, while the RBAC role controls which
-   cmdlets it may run once in. Both are required for the Exchange Admin source — without the role a
-   valid token still returns `403 Forbidden`.
-5. *(Recommended)* scope mailbox access via RBAC for Applications, and add the app to the EWS
-   **AppID allow list** while EWS is in use.
+This is a one-time setup performed by a tenant administrator — a member of the **Global
+Administrator** or **Privileged Role Administrator** role, since the steps grant admin consent and
+assign a directory role. Everything below is doable from **Linux and the web portals alone**: no
+Windows and no Azure subscription are required, just an Entra / Office 365 tenant.
+
+### Why the permission list is heterogeneous
+
+mailtracker reads rules from three sources, and each touches a *different* Microsoft 365 access
+plane — which is why the grants don't all come from one place:
+
+| Source | Plane | Grant it needs |
+|--------|-------|----------------|
+| Graph `messageRules` (primary, GA) | Graph data-plane | `MailboxSettings.Read` (application) |
+| Graph `userConfiguration` FAI (future, beta) | Graph data-plane | `MailboxConfigItem.Read` (application) |
+| EWS FAI / hidden-rule blob (today) | EWS data-plane | `full_access_as_app` (application) |
+| Exchange `Get-InboxRule` (cross-check) | Exchange management-plane | `Exchange.ManageAsApp` **+ an Entra directory role** |
+
+The last row is the one that trips people up: running an Exchange *cmdlet* app-only is **not** a
+Graph permission and **not** a custom Exchange RBAC management role. It needs two separate things —
+the `Exchange.ManageAsApp` permission to reach the management endpoint at all, and an **Entra
+directory role** assigned to the app that says what it may do once inside (see step 5).
+
+### 1. Register the application
+
+**Entra admin center (`entra.microsoft.com`) → Identity → Applications → App registrations → New
+registration.** Choose single-tenant ("My organization only") for a per-tenant install. From the
+**Overview** page record:
+
+- **Application (client) ID** — the app identity used everywhere.
+- **Directory (tenant) ID**.
+- The tenant's `*.onmicrosoft.com` domain — this is the `-Organization` value for app-only sign-in.
+  It is *not* necessarily your vanity domain. List it explicitly:
+
+  ```powershell
+  Get-AcceptedDomain | Where-Object { $_.DomainName -like "*.onmicrosoft.com" }
+  ```
+
+### 2. Upload the certificate
+
+Generate the keypair as in [Creating the certificate](#creating-the-certificate) above, then under
+**Certificates & secrets → Certificates** upload the **public** key (`mailtracker.crt`/`.cer`). Keep
+the matching PKCS#12 (`.pfx`) private key on the machine running mailtracker (`chmod 600`, never
+committed).
+
+### 3. Grant API permissions
+
+**API permissions → Add a permission**, all as **Application permissions**:
+
+- Microsoft Graph: `MailboxSettings.Read` — primary server-side rule reads.
+- Microsoft Graph: `MailboxConfigItem.Read` — future Graph FAI transport (beta; confirm the exact
+  name in the portal, beta names drift). Optional until that transport is GA.
+- Office 365 Exchange Online: `Exchange.ManageAsApp` — lets the `Get-InboxRule` cross-check
+  authenticate to the Exchange management endpoint. The preview Admin API may list it as
+  `Exchange.ManageAsAppV2` — grant whichever your portal shows.
+- Office 365 Exchange Online: `full_access_as_app` — EWS FAI transport that reads hidden/client-only
+  rules **today**. Broad and high-value; it is temporary — drop it once you switch
+  `fai_transport=graph`.
+
+Then click **Grant admin consent** for the tenant. Nothing works until consent is granted.
+
+### 4. (Recommended) Scope EWS access while EWS is in use
+
+`full_access_as_app` grants EWS access to *every* mailbox by default. While the EWS transport is
+active, constrain it with an **Application Access Policy** (and/or the org's EWS app allow-list) so
+the app can only reach the mailboxes you intend to audit. This becomes moot once EWS retires.
+
+### 5. Assign the Exchange directory role (the cmdlet "room")
+
+This is what actually lets the app run `Get-InboxRule` app-only — and it is the step people get
+wrong. Assign an **Entra directory role** in the portal (directory roles are free, no subscription):
+
+1. Entra admin center → **Identity → Roles & admins → Roles & administrators**.
+2. Pick the role → **Add assignments** → search for the app by name → add it (service principals
+   appear in the assignment picker).
+3. Role choice, least privilege first:
+   - Try **Exchange Recipient Administrator** and verify it with the smoke test in step 6 — it may
+     not include the inbox-rule cmdlets.
+   - If the smoke test returns unauthorized, use **Exchange Administrator** (covers any Exchange
+     Online PowerShell task). It is broader; accept the trade-off knowingly.
+
+> **Do not** try to grant `Get-InboxRule` via `New-ServicePrincipal` + a custom management role and
+> `New-ManagementRoleAssignment -App`. Exchange only allows its curated *service-principal* roles
+> (the `Application *` roles, none of which expose `Get-InboxRule`) to be assigned that way, and
+> rejects anything else with `please specify a service principal role`. Cmdlet access for an app
+> comes from the directory role above, not a management role.
+
+### 6. Verify (app-only, from Linux)
+
+Confirm the app can authenticate and read another user's rules. On Linux, point the module at the
+**`.pfx` file** — `-CertificateThumbprint` reads the Windows cert store and does **not** work here.
+
+```powershell
+# PowerShell 7 on Linux, ExchangeOnlineManagement module installed
+$pfxPass = Read-Host "PFX password" -AsSecureString
+Connect-ExchangeOnline `
+  -AppId <client-id> `
+  -Organization <tenant>.onmicrosoft.com `
+  -CertificateFilePath /path/to/mailtracker.pfx `
+  -CertificatePassword $pfxPass
+
+Get-InboxRule -Mailbox someone-else@<tenant-domain> -IncludeHidden
+```
+
+- **Rules returned** → cert, `Exchange.ManageAsApp`, and the directory role are all correct.
+- **Failure on the `Connect` line** → cert mismatch or `Exchange.ManageAsApp` not consented.
+- **Unauthorized on `Get-InboxRule`** → role too low; raise Exchange Recipient Administrator →
+  Exchange Administrator and retest.
+
+Also exercise the Graph side independently (`MailboxSettings.Read` against
+`/users/{id}/mailFolders/inbox/messageRules`) to confirm the primary source. Then run
+`mailtracker register` to capture these values, validate every token live, and create the tenant DB.
+
+### Notes & gotchas
+
+- **Object IDs differ.** The App registrations page shows the *registration's* object ID; the
+  *service principal* (under Enterprise applications) has a different object ID. This process uses
+  the **client ID** throughout, so the distinction only matters if you ever need the SP object ID.
+- **Admin sign-in on Linux:** `Connect-ExchangeOnline -Device` (device-code flow). In Azure Cloud
+  Shell, recent module versions need `-DisableWAM` instead.
+- **Clean up trial-and-error:** if earlier attempts created an Exchange service principal + custom
+  RBAC role, remove them (`Remove-ManagementRole "<name>"`, `Remove-ServicePrincipal -Identity
+  "<name>"`) — neither is part of this process.
+- **Privilege footprint — a conscious choice.** The primary Graph source needs only the narrow
+  `MailboxSettings.Read`. The `Get-InboxRule` cross-check pulls in `Exchange.ManageAsApp` plus a
+  tenant-wide Exchange admin-family role — the heaviest grant here — and EWS adds
+  `full_access_as_app`. If the cross-check's forensic value doesn't justify that footprint, run
+  mailtracker on **Graph alone** (primary + FAI transport) and skip step 5 and the Exchange/EWS
+  permissions entirely.
 
 ## Usage
 
